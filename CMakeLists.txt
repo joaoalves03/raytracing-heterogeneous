@@ -60,7 +60,29 @@ elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(-Wreorder) # Data member will be initialized after [other] data member
     add_compile_options(-Wsometimes-uninitialized) # Variable improperly initialized
     add_compile_options(-Wunused-variable) # Variable is defined but unused
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "NVHPC" OR CMAKE_CXX_COMPILER_ID MATCHES "PGI")
+
+    option(USE_GPU "Compile OpenACC to GPU" ON)
+
+    if(USE_GPU)
+        set(ACC_TARGET "-gpu=cc80,managed")
+        message(STATUS "OpenACC Target: NVIDIA GPU (A100)")
+    else()
+        set(ACC_TARGET "-target=multicore")
+        message(STATUS "OpenACC Target: CPU Multicore")
+    endif()
+
+    set(ACC_FLAGS "-acc ${ACC_TARGET} -Minfo=accel")
+
+    if(CMAKE_BUILD_TYPE STREQUAL "Release")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ACC_FLAGS} -O3 -fast")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ACC_FLAGS} -g -O0")
+    endif()
+    
+    add_link_options(-acc ${ACC_TARGET})
 endif()
+
 
 # Executables
 add_executable(inOneWeekend      ${EXTERNAL} ${SOURCE_ONE_WEEKEND})
