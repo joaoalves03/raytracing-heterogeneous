@@ -18,6 +18,7 @@ echo "Dir  : $(pwd)"
 date
 
 mkdir -p ./out
+rm -rf build
 
 
 cmake -B build -DCMAKE_CXX_COMPILER=nvc++ -DCMAKE_BUILD_TYPE=Debug

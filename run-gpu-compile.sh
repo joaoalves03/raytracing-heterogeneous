@@ -24,7 +24,4 @@ rm -rf build
 cmake -B build -DCMAKE_CXX_COMPILER=nvc++ -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 
-export PGI_ACC_TIME=1
-./build/inOneWeekend > ./out/$SLURM_JOB_ID.ppm
-
 date

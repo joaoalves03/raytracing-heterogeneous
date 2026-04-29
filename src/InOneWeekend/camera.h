@@ -1,154 +1,162 @@
 #ifndef CAMERA_H
 #define CAMERA_H
-//==============================================================================================
-// Originally written in 2016 by Peter Shirley <ptrshrl@gmail.com>
-//
-// To the extent possible under law, the author(s) have dedicated all copyright and related and
-// neighboring rights to this software to the public domain worldwide. This software is
-// distributed without any warranty.
-//
-// You should have received a copy (see file COPYING.txt) of the CC0 Public Domain Dedication
-// along with this software. If not, see <http://creativecommons.org/publicdomain/zero/1.0/>.
-//==============================================================================================
 
-#include "hittable.h"
-#include "material.h"
-
+#include "hittable_list.h"
 
 class camera {
   public:
-    double aspect_ratio      = 1.0;  // Ratio of image width over height
-    int    image_width       = 100;  // Rendered image width in pixel count
-    int    samples_per_pixel = 10;   // Count of random samples for each pixel
-    int    max_depth         = 10;   // Maximum number of ray bounces into scene
+    double aspect_ratio      = 1.0;
+    int    image_width       = 100;
+    int    samples_per_pixel = 10;
+    int    max_depth         = 10;
 
-    double vfov     = 90;              // Vertical view angle (field of view)
-    point3 lookfrom = point3(0,0,0);   // Point camera is looking from
-    point3 lookat   = point3(0,0,-1);  // Point camera is looking at
-    vec3   vup      = vec3(0,1,0);     // Camera-relative "up" direction
+    double vfov     = 90;
+    point3 lookfrom = point3(0, 0, 0);
+    point3 lookat   = point3(0, 0, -1);
+    vec3   vup      = vec3(0, 1, 0);
 
-    double defocus_angle = 0;  // Variation angle of rays through each pixel
-    double focus_dist = 10;    // Distance from camera lookfrom point to plane of perfect focus
+    double defocus_angle = 0;
+    double focus_dist    = 10;
 
-    void render(const hittable& world) {
+    void render(const hittable_list& world) {
         initialize();
 
-        std::cout << "P3\n" << image_width << ' ' << image_height << "\n255\n";
+        int     n_spheres    = world.count;
+        Sphere* spheres      = world.objects;
+        int     total_pixels = image_width * image_height;
+        color*  framebuffer  = new color[total_pixels]();
 
-        for (int j = 0; j < image_height; j++) {
-            std::clog << "\rScanlines remaining: " << (image_height - j) << ' ' << std::flush;
-            for (int i = 0; i < image_width; i++) {
-                color pixel_color(0,0,0);
-                for (int sample = 0; sample < samples_per_pixel; sample++) {
-                    ray r = get_ray(i, j);
-                    pixel_color += ray_color(r, max_depth, world);
-                }
-                write_color(std::cout, pixel_samples_scale * pixel_color);
+        int    iw  = image_width;
+        int    ih  = image_height;
+        int    spp = samples_per_pixel;
+        double pss = pixel_samples_scale;
+        int    md  = max_depth;
+        point3 p00 = pixel00_loc;
+        vec3   pdu = pixel_delta_u;
+        vec3   pdv = pixel_delta_v;
+        point3 ctr = center;
+        double da  = defocus_angle;
+        vec3   ddu = defocus_disk_u;
+        vec3   ddv = defocus_disk_v;
+
+        std::clog << "Rendering " << iw << "x" << ih
+                  << " @ " << spp << " spp...\n" << std::flush;
+
+#pragma acc parallel loop gang vector \
+    copyin(spheres[0:n_spheres]) \
+    copyout(framebuffer[0:total_pixels]) \
+    firstprivate(iw,ih,spp,pss,md,p00,pdu,pdv,ctr,da,ddu,ddv,n_spheres)
+        for (int idx = 0; idx < total_pixels; idx++) {
+            int j = idx / iw;
+            int i = idx % iw;
+            //std::clog << "\rScanlines remaining: " << (image_height - j) << ' ' << std::flush;
+            // unique per-pixel seed, advanced through all random calls by ref
+            unsigned int seed = (unsigned int)(idx * 1973u + 9277u);
+
+            color pixel_color(0, 0, 0);
+            for (int s = 0; s < spp; s++) {
+                ray r = get_ray_d(i, j, p00, pdu, pdv, ctr, da, ddu, ddv, seed);
+                hittable_list w(spheres, n_spheres);
+                pixel_color += ray_color_d(r, md, w, seed);
             }
+            framebuffer[idx] = pss * pixel_color;
         }
 
-        std::clog << "\rDone.                 \n";
+        std::cout << "P3\n" << iw << ' ' << ih << "\n255\n";
+        for (int idx = 0; idx < total_pixels; idx++)
+            write_color(std::cout, framebuffer[idx]);
+        delete[] framebuffer;
+        std::clog << "Done.\n";
     }
 
   private:
-    int    image_height;         // Rendered image height
-    double pixel_samples_scale;  // Color scale factor for a sum of pixel samples
-    point3 center;               // Camera center
-    point3 pixel00_loc;          // Location of pixel 0, 0
-    vec3   pixel_delta_u;        // Offset to pixel to the right
-    vec3   pixel_delta_v;        // Offset to pixel below
-    vec3   u, v, w;              // Camera frame basis vectors
-    vec3   defocus_disk_u;       // Defocus disk horizontal radius
-    vec3   defocus_disk_v;       // Defocus disk vertical radius
+    int    image_height;
+    double pixel_samples_scale;
+    point3 center;
+    point3 pixel00_loc;
+    vec3   pixel_delta_u;
+    vec3   pixel_delta_v;
+    vec3   u, v, w;
+    vec3   defocus_disk_u;
+    vec3   defocus_disk_v;
 
     void initialize() {
         image_height = int(image_width / aspect_ratio);
-        image_height = (image_height < 1) ? 1 : image_height;
-
+        if (image_height < 1) image_height = 1;
         pixel_samples_scale = 1.0 / samples_per_pixel;
-
         center = lookfrom;
 
-        // Determine viewport dimensions.
         auto theta = degrees_to_radians(vfov);
-        auto h = std::tan(theta/2);
-        auto viewport_height = 2 * h * focus_dist;
-        auto viewport_width = viewport_height * (double(image_width)/image_height);
+        auto h     = std::tan(theta / 2);
+        auto vp_h  = 2 * h * focus_dist;
+        auto vp_w  = vp_h * (double(image_width) / image_height);
 
-        // Calculate the u,v,w unit basis vectors for the camera coordinate frame.
         w = unit_vector(lookfrom - lookat);
         u = unit_vector(cross(vup, w));
         v = cross(w, u);
 
-        // Calculate the vectors across the horizontal and down the vertical viewport edges.
-        vec3 viewport_u = viewport_width * u;    // Vector across viewport horizontal edge
-        vec3 viewport_v = viewport_height * -v;  // Vector down viewport vertical edge
+        vec3 vp_u = vp_w * u;
+        vec3 vp_v = vp_h * -v;
 
-        // Calculate the horizontal and vertical delta vectors from pixel to pixel.
-        pixel_delta_u = viewport_u / image_width;
-        pixel_delta_v = viewport_v / image_height;
+        pixel_delta_u = vp_u / image_width;
+        pixel_delta_v = vp_v / image_height;
 
-        // Calculate the location of the upper left pixel.
-        auto viewport_upper_left = center - (focus_dist * w) - viewport_u/2 - viewport_v/2;
-        pixel00_loc = viewport_upper_left + 0.5 * (pixel_delta_u + pixel_delta_v);
+        auto vp_upper_left = center - (focus_dist*w) - vp_u/2 - vp_v/2;
+        pixel00_loc = vp_upper_left + 0.5*(pixel_delta_u + pixel_delta_v);
 
-        // Calculate the camera defocus disk basis vectors.
-        auto defocus_radius = focus_dist * std::tan(degrees_to_radians(defocus_angle / 2));
+        auto defocus_radius = focus_dist * std::tan(degrees_to_radians(defocus_angle/2));
         defocus_disk_u = u * defocus_radius;
         defocus_disk_v = v * defocus_radius;
     }
 
-    ray get_ray(int i, int j) const {
-        // Construct a camera ray originating from the defocus disk and directed at a randomly
-        // sampled point around the pixel location i, j.
-
-        auto offset = sample_square();
-        auto pixel_sample = pixel00_loc
-                          + ((i + offset.x()) * pixel_delta_u)
-                          + ((j + offset.y()) * pixel_delta_v);
-
-        auto ray_origin = (defocus_angle <= 0) ? center : defocus_disk_sample();
-        auto ray_direction = pixel_sample - ray_origin;
-
-        return ray(ray_origin, ray_direction);
-    }
-
-    vec3 sample_square() const {
-        // Returns the vector to a random point in the [-.5,-.5]-[+.5,+.5] unit square.
-        return vec3(random_double() - 0.5, random_double() - 0.5, 0);
-    }
-
-    vec3 sample_disk(double radius) const {
-        // Returns a random point in the unit (radius 0.5) disk centered at the origin.
-        return radius * random_in_unit_disk();
-    }
-
-    point3 defocus_disk_sample() const {
-        // Returns a random point in the camera defocus disk.
-        auto p = random_in_unit_disk();
-        return center + (p[0] * defocus_disk_u) + (p[1] * defocus_disk_v);
-    }
-
-    color ray_color(const ray& r, int depth, const hittable& world) const {
-        // If we've exceeded the ray bounce limit, no more light is gathered.
-        if (depth <= 0)
-            return color(0,0,0);
-
-        hit_record rec;
-
-        if (world.hit(r, interval(0.001, infinity), rec)) {
-            ray scattered;
-            color attenuation;
-            if (rec.mat->scatter(r, rec, attenuation, scattered))
-                return attenuation * ray_color(scattered, depth-1, world);
-            return color(0,0,0);
+    // seed is unsigned int& — advanced by every random call
+    #pragma acc routine seq
+    static ray get_ray_d(int i, int j,
+                         const point3& p00, const vec3& pdu, const vec3& pdv,
+                         const point3& ctr, double da,
+                         const vec3& ddu, const vec3& ddv,
+                         unsigned int& seed) {
+        vec3 offset = vec3(random_double_gpu(seed) - 0.5,
+                           random_double_gpu(seed) - 0.5, 0);
+        auto pixel_sample = p00 + ((i + offset.x()) * pdu)
+                                + ((j + offset.y()) * pdv);
+        point3 ray_origin;
+        if (da <= 0) {
+            ray_origin = ctr;
+        } else {
+            auto p = random_in_unit_disk_gpu(seed);
+            ray_origin = ctr + (p[0]*ddu) + (p[1]*ddv);
         }
+        return ray(ray_origin, pixel_sample - ray_origin);
+    }
 
-        vec3 unit_direction = unit_vector(r.direction());
-        auto a = 0.5*(unit_direction.y() + 1.0);
-        return (1.0-a)*color(1.0, 1.0, 1.0) + a*color(0.5, 0.7, 1.0);
+    #pragma acc routine seq
+    static color ray_color_d(const ray& r, int depth,
+                              const hittable_list& world,
+                              unsigned int& seed) {
+        ray   cur_ray = r;
+        color attn(1.0, 1.0, 1.0);
+
+        for (int i = 0; i < depth; i++) {
+            hit_record rec;
+            if (world.hit(cur_ray, interval(0.001, infinity), rec)) {
+                ray   scattered;
+                color mat_attn;
+                if (rec.mat.scatter(cur_ray, rec.p, rec.normal,
+                                    rec.front_face, mat_attn, scattered, seed)) {
+                    attn    = attn * mat_attn;
+                    cur_ray = scattered;
+                } else {
+                    return color(0, 0, 0);
+                }
+            } else {
+                vec3 ud = unit_vector(cur_ray.direction());
+                auto a  = 0.5 * (ud.y() + 1.0);
+                return attn * ((1.0-a)*color(1,1,1) + a*color(0.5,0.7,1.0));
+            }
+        }
+        return color(0, 0, 0);
     }
 };
-
 
 #endif
